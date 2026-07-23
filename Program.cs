@@ -1,7 +1,9 @@
 using System.Globalization;
+using System.IO.Compression;
 using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.AspNetCore.ResponseCompression;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Microsoft.OpenApi;
@@ -107,6 +109,26 @@ builder.Services.AddRateLimiter(options =>
     };
 });
 
+// HTTP content-encoding negotiation (RFC 9110 §8.4): the client advertises the codecs it
+// understands via `Accept-Encoding`, the server picks one, compresses the body, and marks it with
+// `Content-Encoding` so the client knows how to inflate it. For compressible text (HTML/CSS/JS/JSON)
+// this cuts transfer size substantially with negligible CPU cost, shortening time-to-first-byte on
+// slow links. Brotli is registered first so it's preferred over Gzip when both are accepted, since
+// it typically compresses smaller for the same content.
+// EnableForHttps is left off (the framework default): compressing dynamic HTTPS responses that
+// reflect user input next to a secret (e.g. the antiforgery token Razor Pages embeds in the Login
+// and Register forms) can leak that secret byte-by-byte via response-size side channel (the BREACH
+// attack). Static assets and plain-HTTP responses are unaffected and still get compressed.
+builder.Services.AddResponseCompression(options =>
+{
+    options.Providers.Add<BrotliCompressionProvider>();
+    options.Providers.Add<GzipCompressionProvider>();
+    options.MimeTypes = ResponseCompressionDefaults.MimeTypes.Concat(["image/svg+xml"]);
+});
+
+builder.Services.Configure<BrotliCompressionProviderOptions>(options => options.Level = CompressionLevel.Fastest);
+builder.Services.Configure<GzipCompressionProviderOptions>(options => options.Level = CompressionLevel.Fastest);
+
 // Registers repositories and services for dependency injection (scoped lifetime)
 builder.Services.AddScoped<IUserRepository, UserRepository>();
 builder.Services.AddScoped<ILinkRepository, LinkRepository>();
@@ -123,6 +145,12 @@ app.UseSecurityHeaders();
 // Measures request latency and appends X-Response-Time; logs a dedicated warning for any
 // request over 500ms. Placed early so the timer wraps the entire downstream pipeline.
 app.UsePerformanceMeasurement();
+
+// Compresses response bodies (Brotli/Gzip) before they're written to the wire. Must run before
+// UseStaticFiles/endpoint execution -- it wraps the response stream so anything written downstream
+// gets encoded -- and after the timing middleware so X-Response-Time still reflects the true
+// request duration including compression work.
+app.UseResponseCompression();
 
 // In non-development environments, uses a friendly error page
 if (!app.Environment.IsDevelopment())
