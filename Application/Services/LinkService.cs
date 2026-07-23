@@ -1,3 +1,6 @@
+using System.Numerics;
+using System.Security.Cryptography;
+using System.Text;
 using Shortly.Application.DTOs;
 using Shortly.Application.Interfaces;
 using Shortly.Domain.Entities;
@@ -6,6 +9,9 @@ namespace Shortly.Application.Services;
 
 public sealed class LinkService : ILinkService
 {
+    private const string Base62Alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    private const int ShortUrlLength = 12;
+
     private readonly ILogger<LinkService> _logger;
     private readonly ILinkRepository _linkRepository;
 
@@ -19,7 +25,7 @@ public sealed class LinkService : ILinkService
     {
         _logger.LogDebug("Creating link for URL: {Url} and userId: {UserId}", url, userId);
 
-        var shortUrl = Ulid.NewUlid().ToString()[..12].ToLowerInvariant();
+        var shortUrl = GenerateShortUrl();
         var link = new Link(url, shortUrl, userId);
 
         await _linkRepository.AddAsync(link);
@@ -78,5 +84,31 @@ public sealed class LinkService : ILinkService
 
         _logger.LogInformation("Retrieved {Count} links for userId: {UserId}.", links.Count, userId);
         return links.Select(LinkResponse.From).ToList();
+    }
+
+    private static string GenerateShortUrl()
+    {
+        var ulidBytes = Ulid.NewUlid().ToByteArray();
+        var hash = SHA256.HashData(ulidBytes);
+        return ToBase62(hash, ShortUrlLength);
+    }
+
+    private static string ToBase62(byte[] bytes, int length)
+    {
+        var value = new BigInteger(bytes, isUnsigned: true, isBigEndian: true);
+        var sb = new StringBuilder();
+
+        while (value > 0 && sb.Length < length)
+        {
+            value = BigInteger.DivRem(value, Base62Alphabet.Length, out var remainder);
+            sb.Insert(0, Base62Alphabet[(int)remainder]);
+        }
+
+        while (sb.Length < length)
+        {
+            sb.Insert(0, Base62Alphabet[0]);
+        }
+
+        return sb.ToString();
     }
 }

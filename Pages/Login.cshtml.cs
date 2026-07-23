@@ -4,10 +4,15 @@ using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.RazorPages;
+using Microsoft.AspNetCore.RateLimiting;
 using Shortly.Application.Interfaces;
 
 namespace Shortly.Pages;
 
+// Applies the "login" fixed-window policy configured in Program.cs (10 attempts / 5 min / IP)
+// to every handler on this page, so brute-force login attempts get a 429 before they ever
+// reach UserService.Login.
+[EnableRateLimiting("login")]
 public class LoginModel : PageModel
 {
     private readonly IUserService _userService;
@@ -55,7 +60,7 @@ public class LoginModel : PageModel
 
             return RedirectToPage("/Index");
         }
-        catch (Exception ex) when (ex is KeyNotFoundException or UnauthorizedAccessException or InvalidOperationException)
+        catch (Exception ex) when (ex is KeyNotFoundException or UnauthorizedAccessException)
         {
             ModelState.AddModelError(string.Empty, "Invalid login attempt.");
             return Page();
