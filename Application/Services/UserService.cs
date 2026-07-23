@@ -1,5 +1,4 @@
-﻿using System.Collections.Concurrent;
-using Shortly.Application.DTOs;
+﻿using Shortly.Application.DTOs;
 using Shortly.Application.Interfaces;
 using Shortly.Domain.Entities;
 
@@ -7,8 +6,6 @@ namespace Shortly.Application.Services;
 
 public sealed class UserService : IUserService
 {
-    private static readonly ConcurrentDictionary<string, ConcurrentQueue<DateTime>> _failedAttempts = new();
-
     private readonly ILogger<UserService> _logger;
     private readonly IUserRepository _userRepository;
 
@@ -53,24 +50,19 @@ public sealed class UserService : IUserService
         var normalizedEmail = NormalizeEmail(email);
         _logger.LogDebug("Attempting login for email: {Email}", normalizedEmail);
 
-        CheckRateLimit(normalizedEmail);
-
         var user = await _userRepository.GetByEmailAsync(normalizedEmail);
         if (user is null)
         {
-            RecordFailedAttempt(normalizedEmail);
             _logger.LogWarning("Login failed: No user found with email {Email}.", normalizedEmail);
             throw new KeyNotFoundException($"No user found with email '{normalizedEmail}'.");
         }
 
         if (!BCrypt.Net.BCrypt.Verify(password, user.Password))
         {
-            RecordFailedAttempt(normalizedEmail);
             _logger.LogWarning("Login failed: Invalid password for email {Email}.", normalizedEmail);
             throw new UnauthorizedAccessException("Invalid password.");
         }
 
-        ResetFailedAttempts(normalizedEmail);
         _logger.LogInformation("User logged in successfully with email: {Email} and id: {Id}.", user.Email, user.Id);
         return UserResponse.From(user);
     }
@@ -92,28 +84,4 @@ public sealed class UserService : IUserService
     }
 
     private static string NormalizeEmail(string email) => email.Trim().ToLowerInvariant();
-
-    private static void CheckRateLimit(string email)
-    {
-        var now = DateTime.UtcNow;
-        var window = _failedAttempts.GetOrAdd(email, _ => new ConcurrentQueue<DateTime>());
-
-        while (window.TryPeek(out var t) && now - t > TimeSpan.FromMinutes(5))
-            window.TryDequeue(out _);
-
-        if (window.Count >= 10)
-            throw new InvalidOperationException("Too many login attempts. Please try again later.");
-    }
-
-    private static void RecordFailedAttempt(string email)
-    {
-        var queue = _failedAttempts.GetOrAdd(email, _ => new ConcurrentQueue<DateTime>());
-        queue.Enqueue(DateTime.UtcNow);
-    }
-
-    private static void ResetFailedAttempts(string email)
-    {
-        _failedAttempts.TryRemove(email, out _);
-    }
-
 }

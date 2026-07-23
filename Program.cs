@@ -1,4 +1,7 @@
+using System.Globalization;
+using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.Authentication.Cookies;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Microsoft.OpenApi;
@@ -10,6 +13,7 @@ using Shortly.Endpoints;
 using Shortly.Infrastructure;
 using Shortly.Infrastructure.Persistence;
 using Shortly.Infrastructure.Repositories;
+using Shortly.Middleware;
 
 // Creates the ASP.NET Core application builder with initial configuration
 var builder = WebApplication.CreateBuilder(args);
@@ -69,6 +73,40 @@ builder.Services.AddSingleton<IConfigureOptions<CookieAuthenticationOptions>>(sp
 // Registers the authorization service
 builder.Services.AddAuthorization();
 
+// HTTP-semantic rate limiting (RFC 6585 429 Too Many Requests): replaces the old hand-rolled
+// ConcurrentDictionary throttle in UserService.Login with the framework's rate limiter, keyed
+// per client IP -- 10 login attempts per 5-minute fixed window, no queueing (extra attempts are
+// rejected immediately rather than held/delayed). AddPolicy (not AddFixedWindowLimiter) is used
+// so each IP gets its own independent window instead of one global counter shared by everyone.
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+
+    options.AddPolicy("login", httpContext => RateLimitPartition.GetFixedWindowLimiter(
+        partitionKey: httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+        factory: _ => new FixedWindowRateLimiterOptions
+        {
+            PermitLimit = 10,
+            Window = TimeSpan.FromMinutes(5),
+            QueueLimit = 0
+        }));
+
+    options.OnRejected = async (rejectedContext, cancellationToken) =>
+    {
+        // Retry-After tells the client exactly when it's worth retrying, instead of the client
+        // guessing and hammering the endpoint again immediately.
+        if (rejectedContext.Lease.TryGetMetadata(MetadataName.RetryAfter, out var retryAfter))
+        {
+            rejectedContext.HttpContext.Response.Headers.RetryAfter =
+                ((int)retryAfter.TotalSeconds).ToString(CultureInfo.InvariantCulture);
+        }
+
+        rejectedContext.HttpContext.Response.ContentType = "text/plain";
+        await rejectedContext.HttpContext.Response.WriteAsync(
+            "Too many login attempts. Please try again later.", cancellationToken);
+    };
+});
+
 // Registers repositories and services for dependency injection (scoped lifetime)
 builder.Services.AddScoped<IUserRepository, UserRepository>();
 builder.Services.AddScoped<ILinkRepository, LinkRepository>();
@@ -77,6 +115,14 @@ builder.Services.AddScoped<ILinkService, LinkService>();
 
 // Builds the application with all registered configurations
 var app = builder.Build();
+
+// Registers baseline browser-side security headers on every response (pages, API, redirects,
+// error pages) -- placed first so it wraps the whole pipeline, including the exception handler.
+app.UseSecurityHeaders();
+
+// Measures request latency and appends X-Response-Time; logs a dedicated warning for any
+// request over 500ms. Placed early so the timer wraps the entire downstream pipeline.
+app.UsePerformanceMeasurement();
 
 // In non-development environments, uses a friendly error page
 if (!app.Environment.IsDevelopment())
@@ -92,6 +138,10 @@ app.UseStaticFiles();
 
 // Enables request routing
 app.UseRouting();
+
+// Enables the rate limiter middleware (must come after UseRouting so endpoint metadata like
+// [EnableRateLimiting] is available, and before the endpoints it protects run)
+app.UseRateLimiter();
 
 // Enables authentication (must come after UseRouting)
 app.UseAuthentication();

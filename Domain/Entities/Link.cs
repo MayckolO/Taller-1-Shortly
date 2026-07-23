@@ -26,6 +26,8 @@ public class Link
 
     public User User { get; private set; } = null!;
 
+    [Required] public DateTimeOffset CreatedAt { get; private set; }
+
     private Link()
     {
     }
@@ -45,6 +47,7 @@ public class Link
             : throw new ArgumentOutOfRangeException(nameof(userId), "UserId must be greater than zero.");
 
         Clicks = 0;
+        CreatedAt = DateTimeOffset.UtcNow;
     }
 
     public void IncrementClicks() => Clicks++;
