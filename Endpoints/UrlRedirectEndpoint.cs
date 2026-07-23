@@ -40,7 +40,8 @@ public static class UrlRedirectEndpoint
             {
                 return Results.NotFound();
             }
-        });
+        })
+        .RequireCors("ApiCors"); // Only cross-origin caller: a JS client resolving/previewing a short link via fetch.
     }
 
     private static string ComputeETag(LinkResponse link)

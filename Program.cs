@@ -84,14 +84,25 @@ builder.Services.AddRateLimiter(options =>
 {
     options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
 
-    options.AddPolicy("login", httpContext => RateLimitPartition.GetFixedWindowLimiter(
-        partitionKey: httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
-        factory: _ => new FixedWindowRateLimiterOptions
+    options.AddPolicy("login", httpContext =>
+    {
+        // CORS preflight (OPTIONS) never reaches UserService.Login and carries no credentials --
+        // counting it against the same budget as real attempts would let preflights from any
+        // origin exhaust a victim's login quota. It's routed to an unlimited partition instead.
+        if (HttpMethods.IsOptions(httpContext.Request.Method))
         {
-            PermitLimit = 10,
-            Window = TimeSpan.FromMinutes(5),
-            QueueLimit = 0
-        }));
+            return RateLimitPartition.GetNoLimiter("preflight");
+        }
+
+        return RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey: httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            factory: _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 10,
+                Window = TimeSpan.FromMinutes(5),
+                QueueLimit = 0
+            });
+    });
 
     options.OnRejected = async (rejectedContext, cancellationToken) =>
     {
@@ -107,6 +118,29 @@ builder.Services.AddRateLimiter(options =>
         await rejectedContext.HttpContext.Response.WriteAsync(
             "Too many login attempts. Please try again later.", cancellationToken);
     };
+});
+
+// CORS (Fetch Living Standard / RFC 9110 preflight): a browser blocks script-initiated
+// cross-origin requests unless the server opts in. For "non-simple" requests -- custom headers,
+// methods beyond GET/HEAD/POST-with-simple-content-type -- the browser first sends an OPTIONS
+// "preflight" carrying Access-Control-Request-Method/-Headers, and only proceeds with the real
+// request if the server answers with matching Access-Control-Allow-Origin/-Methods/-Headers.
+// Only the redirect endpoint (GET /{shortUrl}) is a machine-consumable API here -- Razor Pages
+// (Login/Register/Index) are server-rendered, same-origin, cookie-authenticated forms with no
+// legitimate cross-origin caller, so no policy is applied to them and AllowAnyOrigin is never used.
+const string ApiCorsPolicy = "ApiCors";
+var corsAllowedOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>()
+    ?? ["https://mi-frontend.example.com"]; // TODO: replace with the real frontend origin(s)
+
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy(ApiCorsPolicy, policy =>
+    {
+        policy.WithOrigins(corsAllowedOrigins)
+            .WithMethods("GET")
+            .WithHeaders("Content-Type", "Accept")
+            .WithExposedHeaders("ETag", "Last-Modified", "X-Response-Time");
+    });
 });
 
 // HTTP content-encoding negotiation (RFC 9110 §8.4): the client advertises the codecs it
@@ -166,6 +200,12 @@ app.UseStaticFiles();
 
 // Enables request routing
 app.UseRouting();
+
+// Resolves CORS preflight/actual requests against the policy attached to the matched endpoint
+// (must come after UseRouting so endpoint metadata is available). Placed before UseRateLimiter so
+// a preflight OPTIONS to a CORS-protected endpoint is answered here directly and never reaches the
+// rate limiter at all.
+app.UseCors();
 
 // Enables the rate limiter middleware (must come after UseRouting so endpoint metadata like
 // [EnableRateLimiting] is available, and before the endpoints it protects run)
