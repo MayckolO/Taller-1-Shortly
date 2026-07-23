@@ -11,6 +11,18 @@ public static class UrlRedirectEndpoint
     {
         app.MapGet("/{shortUrl}", async (string shortUrl, HttpContext httpContext, ILinkService linkService) =>
         {
+            // Content negotiation for errors (RFC 9457, formerly RFC 7807): instead of an ad-hoc
+            // plain-text body, error responses use application/problem+json -- a standard shape
+            // (type/title/status/detail/instance) that any HTTP client/library can parse uniformly,
+            // instead of having to special-case this API's error format.
+            if (!IsValidShortUrl(shortUrl))
+            {
+                return Results.Problem(
+                    statusCode: StatusCodes.Status400BadRequest,
+                    title: "Invalid short URL",
+                    detail: $"'{shortUrl}' is not a well-formed short URL (expected {ShortUrlLength} base62 characters).");
+            }
+
             try
             {
                 var link = await linkService.GetLink(shortUrl);
@@ -36,13 +48,22 @@ public static class UrlRedirectEndpoint
 
                 return Results.Redirect(link.Url);
             }
-            catch (KeyNotFoundException)
+            catch (KeyNotFoundException ex)
             {
-                return Results.NotFound();
+                return Results.Problem(
+                    statusCode: StatusCodes.Status404NotFound,
+                    title: "Short URL not found",
+                    detail: ex.Message);
             }
         })
         .RequireCors("ApiCors"); // Only cross-origin caller: a JS client resolving/previewing a short link via fetch.
     }
+
+    private const int ShortUrlLength = 12;
+    private const string Base62Alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+
+    private static bool IsValidShortUrl(string shortUrl) =>
+        shortUrl.Length == ShortUrlLength && shortUrl.All(Base62Alphabet.Contains);
 
     private static string ComputeETag(LinkResponse link)
     {
