@@ -40,3 +40,48 @@ A continuación se listan los prompts utilizados durante el desarrollo del Talle
 >"como se protege los inicios de sesion a nivel de framework?"
 
 **Resultado:** se dió una breve explicación y luego se eliminó el throttling manual con `ConcurrentDictionary` en `UserService.Login` y se reemplazó por el rate limiter nativo de ASP.NET Core, con una policy `"login"` particionada por IP, aplicada en `Pages/Login.cshtml.cs` vía `[EnableRateLimiting("login")]`, devolviendo `429` con `Retry-After`.
+
+---
+
+**Prompt:**
+> "como habilito compresión brotli y gzip en asp.net core y donde la ubico en el pipeline?"
+
+**Uso:** Se pidió una explicación de cómo activar la compresión de respuestas y en qué orden del middleware debía ir respecto a lo ya configurado.
+
+**Resultado:** Se agregó `AddResponseCompression()` con `BrotliCompressionProvider` y `GzipCompressionProvider` en `Program.cs`, con `EnableForHttps` desactivado (riesgo BREACH en contenido dinámico con secretos), y `app.UseResponseCompression()` ubicado en el pipeline.
+
+---
+
+**Prompt:**
+> "como configuro una política de cors restrictiva en vez de allowanyorigin?"
+
+**Uso:** Se pidió una explicación de cómo definir una política CORS explícita (orígenes/métodos/headers) y dónde aplicarla.
+
+**Resultado:** Se agregó `AddCors()` con la política `"ApiCors"` en `Program.cs`, `app.UseCors()` en el pipeline, y `.RequireCors("ApiCors")` aplicado al endpoint `GET /{shortUrl}` en `UrlRedirectEndpoint.cs`.
+
+---
+
+**Prompt:**
+> "como devuelvo errores en formato application/problem+json en vez de texto plano?"
+
+**Uso:** Se pidió una explicación de RFC 9457/problem+json y cómo reemplazar las respuestas de error existentes.
+
+**Resultado:** Se agregó validación de formato del `shortUrl` (400 vía `Results.Problem()`) y se modificó el `catch (KeyNotFoundException)` para devolver 404 en el mismo formato, en `UrlRedirectEndpoint.cs`. Se detectó y corrigió un bug durante las pruebas: la validación inicial asumía longitud fija de 12 caracteres, rompiendo los shortUrls sembrados (`aspnet`, `github`, `efcore`); se corrigió para validar solo charset base62 y el `MaxLength` real (32).
+
+---
+
+**Prompt:**
+> "que flags de seguridad le tengo que poner a las cookies de la app?"
+
+**Uso:** Se pidió una explicación de HttpOnly, SameSite, Secure y Path, y una auditoría de dónde se escribían cookies en el proyecto.
+
+**Resultado:** Se identificaron dos cookies (autenticación y antiforgery) y se configuraron explícitamente en `Program.cs` con `HttpOnly=true`, `SameSite=Strict`, `Path="/"` y `SecurePolicy` condicionado al entorno.
+
+---
+
+**Prompt:**
+> "cuando corresponde usar 301 vs 302 vs 307 en una redirección?"
+
+**Uso:** Se pidió una explicación de la semántica de cada código y cómo aplicarla según el estado del link (clicks, antigüedad).
+
+**Resultado:** Se modificó `UrlRedirectEndpoint.cs` para devolver `301` (links con >100 clicks, con `Cache-Control: public, max-age=300, must-revalidate`), `307` (links nuevos, 0 clicks y <24h) y `302` como fallback, preservando la validación y el manejo 404 del ítem #8.
