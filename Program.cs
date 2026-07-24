@@ -61,6 +61,24 @@ builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationSc
     {
         options.LoginPath = "/Login";
         options.AccessDeniedPath = "/Error";
+
+        // Cookie hardening audit (#9): explicit flags instead of relying on framework defaults.
+        // - HttpOnly: document.cookie can never read this cookie, so even a successful XSS
+        //   injection can't exfiltrate the session -- the #1 session-theft vector.
+        // - SameSite=Strict: the browser never attaches this cookie to a request that originated
+        //   from another site (including top-level link clicks), the strongest CSRF defense.
+        //   Login is always a same-site form POST here (no cross-site login flow, and the CORS
+        //   policy from #7 never sends credentials), so Strict costs nothing functionally.
+        // - Path=/: scopes the cookie to the whole app, matching how every page actually uses it.
+        // - Secure: mandatory outside Development so the cookie is never sent over plain HTTP;
+        //   SameAsRequest only in Development keeps the http:// launch profile usable locally
+        //   without hardcoding false (which would silently weaken production too).
+        options.Cookie.HttpOnly = true;
+        options.Cookie.SameSite = SameSiteMode.Strict;
+        options.Cookie.Path = "/";
+        options.Cookie.SecurePolicy = builder.Environment.IsDevelopment()
+            ? CookieSecurePolicy.SameAsRequest
+            : CookieSecurePolicy.Always;
     });
 
 // Injects the ticket store into the cookie options after the service provider is built
@@ -74,6 +92,20 @@ builder.Services.AddSingleton<IConfigureOptions<CookieAuthenticationOptions>>(sp
 
 // Registers the authorization service
 builder.Services.AddAuthorization();
+
+// Razor Pages registers its antiforgery (CSRF token) cookie implicitly via AddRazorPages() below,
+// with framework defaults. Configured explicitly here so the second cookie in play on every
+// Login/Register/Index form submission gets the same hardening as the auth cookie above, instead
+// of an unaudited implicit one.
+builder.Services.AddAntiforgery(options =>
+{
+    options.Cookie.HttpOnly = true;
+    options.Cookie.SameSite = SameSiteMode.Strict;
+    options.Cookie.Path = "/";
+    options.Cookie.SecurePolicy = builder.Environment.IsDevelopment()
+        ? CookieSecurePolicy.SameAsRequest
+        : CookieSecurePolicy.Always;
+});
 
 // HTTP-semantic rate limiting (RFC 6585 429 Too Many Requests): replaces the old hand-rolled
 // ConcurrentDictionary throttle in UserService.Login with the framework's rate limiter, keyed
